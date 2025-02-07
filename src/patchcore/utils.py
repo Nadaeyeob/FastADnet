@@ -56,7 +56,7 @@ def plot_segmentation_images(
             if mask_path is not None:
                 mask = PIL.Image.open(mask_path).convert("RGB")
                 mask = mask_transform(mask)
-                if not isinstance(mask, np.ndarray):
+                if not isinstance(mask, np.ndarray): 
                     mask = mask.numpy()
             else:
                 mask = np.zeros_like(image)
@@ -75,7 +75,7 @@ def plot_segmentation_images(
 
 
 def create_storage_folder(
-    main_folder_path, project_folder, group_folder, mode="iterate"
+    main_folder_path, project_folder, group_folder, mode="overwrite"
 ):
     os.makedirs(main_folder_path, exist_ok=True)
     project_path = os.path.join(main_folder_path, project_folder)
@@ -123,8 +123,9 @@ def fix_seeds(seed, with_torch=True, with_cuda=True):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
 
-
 def compute_and_store_final_results(
+    parameter_name,
+    parameter,
     results_path,
     results,
     row_names=None,
@@ -147,19 +148,33 @@ def compute_and_store_final_results(
     """
     if row_names is not None:
         assert len(row_names) == len(results), "#Rownames != #Result-rows."
-
     mean_metrics = {}
     for i, result_key in enumerate(column_names):
         mean_metrics[result_key] = np.mean([x[i] for x in results])
         LOGGER.info("{0}: {1:3.3f}".format(result_key, mean_metrics[result_key]))
 
     savename = os.path.join(results_path, "results.csv")
+    # 이전 결과를 읽기
+    previous_results = []
+    if os.path.exists(savename):
+        with open(savename, "r") as csv_file:
+            csv_reader = csv.reader(csv_file)
+            for row in csv_reader:
+                previous_results.append(row)
+
     with open(savename, "w") as csv_file:
         csv_writer = csv.writer(csv_file, delimiter=",")
+
+        # 기존 결과 추가
+        for row in previous_results:
+            csv_writer.writerow(row)
+
+        # 새로운 결과 추가
+        csv_writer.writerow(parameter_name)
+        csv_writer.writerow(parameter)
         header = column_names
         if row_names is not None:
             header = ["Row Names"] + header
-
         csv_writer.writerow(header)
         for i, result_list in enumerate(results):
             csv_row = result_list
@@ -173,3 +188,34 @@ def compute_and_store_final_results(
 
     mean_metrics = {"mean_{0}".format(key): item for key, item in mean_metrics.items()}
     return mean_metrics
+
+import torch
+
+def calculate_matmul_n_times(n_components, mat_a, mat_b):
+    """
+    Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
+    Bypasses torch.matmul to reduce memory footprint.
+    args:
+        mat_a:      torch.Tensor (n, k, 1, d)
+        mat_b:      torch.Tensor (1, k, d, d)
+    """
+    res = torch.zeros(mat_a.shape).to(mat_a.device)
+    
+    for i in range(n_components):
+        mat_a_i = mat_a[:, i, :, :].squeeze(-2)
+        mat_b_i = mat_b[0, i, :, :].squeeze()
+        res[:, i, :, :] = mat_a_i.mm(mat_b_i).unsqueeze(1)
+    
+    return res
+
+
+def calculate_matmul(mat_a, mat_b):
+    """
+    Calculate matrix product of two matrics with mat_a[0] >= mat_b[0].
+    Bypasses torch.matmul to reduce memory footprint.
+    args:
+        mat_a:      torch.Tensor (n, k, 1, d)
+        mat_b:      torch.Tensor (n, k, d, 1)
+    """
+    assert mat_a.shape[-2] == 1 and mat_b.shape[-1] == 1
+    return torch.sum(mat_a.squeeze(-2) * mat_b.squeeze(-1), dim=2, keepdim=True)

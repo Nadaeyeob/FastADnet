@@ -2,7 +2,7 @@
 import logging
 import os
 import pickle
-
+import random
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,6 +12,10 @@ import patchcore
 import patchcore.backbones
 import patchcore.common
 import patchcore.sampler
+import time
+
+from patchcore.tool import DatasetLoader, Autoencoder
+from patchcore.tool import make_sampling_ratio
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,8 +39,16 @@ class PatchCore(torch.nn.Module):
         anomaly_score_num_nn=1,
         featuresampler=patchcore.sampler.IdentitySampler(),
         nn_method=patchcore.common.FaissNN(False, 4),
+        sampler_ratio=0.4,
+        sampler_dimension=128,
+        sampler_cluster_n=10,
         **kwargs,
     ):
+        
+        self.sampler_ratio = sampler_ratio
+        self.sampler_dimension = sampler_dimension
+        self.sampler_cluster_n = sampler_cluster_n
+        
         self.backbone = backbone.to(device)
         self.layers_to_extract_from = layers_to_extract_from
         self.input_shape = input_shape
@@ -61,7 +73,7 @@ class PatchCore(torch.nn.Module):
         preadapt_aggregator = patchcore.common.Aggregator(
             target_dim=target_embed_dimension
         )
-
+ 
         _ = preadapt_aggregator.to(self.device)
 
         self.forward_modules["preadapt_aggregator"] = preadapt_aggregator
@@ -76,6 +88,9 @@ class PatchCore(torch.nn.Module):
 
         self.featuresampler = featuresampler
 
+    def load_(self):
+        return [self.sampler_ratio, self.sampler_dimension, self.sampler_cluster_n]
+    
     def embed(self, data):
         if isinstance(data, torch.utils.data.DataLoader):
             features = []
@@ -99,7 +114,7 @@ class PatchCore(torch.nn.Module):
         _ = self.forward_modules["feature_aggregator"].eval()
         with torch.no_grad():
             features = self.forward_modules["feature_aggregator"](images)
-
+        # [16,512,28,28] , [16,1024,14,14]
         features = [features[layer] for layer in self.layers_to_extract_from]
 
         features = [
@@ -108,6 +123,7 @@ class PatchCore(torch.nn.Module):
         patch_shapes = [x[1] for x in features]
         features = [x[0] for x in features]
         ref_num_patches = patch_shapes[0]
+        self.patch_shape = patch_shapes[0]
 
         for i in range(1, len(features)):
             _features = features[i]
@@ -135,13 +151,15 @@ class PatchCore(torch.nn.Module):
             features[i] = _features
         features = [x.reshape(-1, *x.shape[-3:]) for x in features]
 
-        # As different feature backbones & patching provide differently
-        # sized features, these are brought into the correct form here.
-        features = self.forward_modules["preprocessing"](features)
+        features = self.forward_modules["preprocessing"](features) 
         features = self.forward_modules["preadapt_aggregator"](features)
-
+        
         if provide_patch_shapes:
-            return _detach(features), patch_shapes
+            self.model.eval()
+            # _features = self.model(features)
+            latent = self.model.encoder(features)
+            _features = self.model.decoder(latent)
+            return _detach(features), _detach(_features), patch_shapes
         return _detach(features)
 
     def fit(self, training_data):
@@ -171,9 +189,45 @@ class PatchCore(torch.nn.Module):
                 features.append(_image_to_features(image))
 
         features = np.concatenate(features, axis=0)
-        features = self.featuresampler.run(features)
 
-        self.anomaly_scorer.fit(detection_features=[features])
+        # need to know more broad bandwith
+        # self.sampler_ratio = calculate_sampling_ratios(features, 1, 0.1, 2)
+        # self.sampler_ratio = make_sampling_ratio(features, 0.1, 256)
+
+        features = torch.tensor(features, device = self.device)
+        with torch.enable_grad():
+            if self.sampler_ratio != 1:
+                self.sampler = patchcore.sampler.ApproximateGreedyCoresetSampler(self.sampler_ratio, 
+                                                                            self.device, 
+                                                                            10, 
+                                                                            self.sampler_dimension,
+                                                                            self.sampler_cluster_n)
+                feature_sampling, total_input, total_output = make_sampling_and_dataset(features,
+                                                                                    self.sampler, 
+                                                                                    self.device, 
+                                                                                    sampling=True,
+                                                                                    # sampling=False,
+                                                                                    )
+            elif self.sampler_ratio == 1:
+                self.sampler = None
+                feature_sampling, total_input, total_output = make_sampling_and_dataset(features,
+                                                                                    self.sampler, 
+                                                                                    self.device, 
+                                                                                    sampling=False,
+                                                                                    )
+            
+            self.model = Autoencoder(features, self.patch_shape)
+            
+            train_t = time.time()
+            self.model.train_(
+                input_data= total_output,
+                output_data= total_input,
+                epochs=50, # POR : 50
+                batch_size=256,
+                learning_rate=1e-3 
+                )
+            train_time = time.time() - train_t
+            print(f'train time is {train_time}')
 
     def predict(self, data):
         if isinstance(data, torch.utils.data.DataLoader):
@@ -207,10 +261,15 @@ class PatchCore(torch.nn.Module):
 
         batchsize = images.shape[0]
         with torch.no_grad():
-            features, patch_shapes = self._embed(images, provide_patch_shapes=True)
+            features, _features, patch_shapes = self._embed(images, provide_patch_shapes=True)
             features = np.asarray(features)
-
-            patch_scores = image_scores = self.anomaly_scorer.predict([features])[0]
+            _features = np.asarray(_features)            
+            
+            diff = features - _features
+            abs_diff = np.abs(diff)
+            abs_diff = np.mean(abs_diff, axis = 1)
+            
+            patch_scores = image_scores = abs_diff
             image_scores = self.patch_maker.unpatch_scores(
                 image_scores, batchsize=batchsize
             )
@@ -222,7 +281,7 @@ class PatchCore(torch.nn.Module):
             )
             scales = patch_shapes[0]
             patch_scores = patch_scores.reshape(batchsize, scales[0], scales[1])
-
+            
             masks = self.anomaly_segmentor.convert_to_segmentation(patch_scores)
 
         return [score for score in image_scores], [mask for mask in masks]
@@ -320,3 +379,55 @@ class PatchMaker:
         if was_numpy:
             return x.numpy()
         return x
+
+####################################################################
+####################################################################
+####################################################################
+####################################################################
+####################################################################
+####################################################################
+
+def make_sampling_and_dataset(features,
+                              sampler,
+                              device,
+                              sampling = True
+                              ):
+    if sampling:
+        sampling_features, sample_indice, cluster_indice = sampler.run(features)
+        
+        sample_indice_tensor = torch.tensor(sample_indice).to(device)
+        cluster_indice_tensor = [torch.tensor(cluster).to(device) for cluster in cluster_indice]
+        
+        for i in range(len(sample_indice)):
+            
+            input_tensor = features[sample_indice_tensor[i]]
+            output_tensor = features[cluster_indice_tensor[i]]
+            
+            input_tensors = input_tensor.repeat(len(cluster_indice_tensor[i]), 1)
+            if i == 0:
+                total_input = input_tensors
+                total_output = output_tensor
+
+            else:
+                total_input = torch.cat((total_input, input_tensors), dim = 0)
+                total_output = torch.cat((total_output, output_tensor), dim = 0)
+            
+    elif sampling == False:
+        sampling_features = None
+        total_input = features.detach().clone()
+        total_output = features.detach().clone()
+    return sampling_features, total_input, total_output
+    # return sampling_features, total_input, total_input
+
+
+
+
+def make_anomaly_score(input_data, 
+                       target_data,
+                       device):
+    data1 = torch.tensor(input_data).to(device)
+    data2 = torch.tensor(target_data).to(device)
+    
+    distance = torch.sqrt(torch.sum((data1 - data2)**2, dim=1))
+    
+    return distance

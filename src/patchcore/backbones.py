@@ -5,6 +5,8 @@ _BACKBONES = {
     "alexnet": "models.alexnet(pretrained=True)",
     "bninception": 'pretrainedmodels.__dict__["bninception"]'
     '(pretrained="imagenet", num_classes=1000)',
+    "resnet18": "models.resnet18(pretrained=True)",
+    "resnet34": "models.resnet34(pretrained=True)",
     "resnet50": "models.resnet50(pretrained=True)",
     "resnet101": "models.resnet101(pretrained=True)",
     "resnext101": "models.resnext101_32x8d(pretrained=True)",
@@ -41,6 +43,7 @@ _BACKBONES = {
     "efficientnet_b5": 'timm.create_model("tf_efficientnet_b5", pretrained=True)',
     "efficientnet_b3": 'timm.create_model("tf_efficientnet_b3", pretrained=True)',
     "efficientnet_b1": 'timm.create_model("tf_efficientnet_b1", pretrained=True)',
+    "efficientnet_b0": 'timm.create_model("tf_efficientnet_b0", pretrained=True)',
     "efficientnetv2_m": 'timm.create_model("tf_efficientnetv2_m", pretrained=True)',
     "efficientnetv2_l": 'timm.create_model("tf_efficientnetv2_l", pretrained=True)',
     "efficientnet_b3a": 'timm.create_model("efficientnet_b3a", pretrained=True)',

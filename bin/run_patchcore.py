@@ -14,6 +14,7 @@ import patchcore.patchcore
 import patchcore.sampler
 import patchcore.utils
 
+import time
 LOGGER = logging.getLogger(__name__)
 
 _DATASETS = {"mvtec": ["patchcore.datasets.mvtec", "MVTecDataset"]}
@@ -45,7 +46,7 @@ def run(
     methods = {key: item for (key, item) in methods}
 
     run_save_path = patchcore.utils.create_storage_folder(
-        results_path, log_project, log_group, mode="iterate"
+        results_path, log_project, log_group, mode="overwrite"
     )
 
     list_of_dataloaders = methods["get_dataloaders"](seed)
@@ -61,7 +62,12 @@ def run(
     )
 
     result_collect = []
-
+    parameter_name = [
+        "sampler_ratio",
+        "sampler_dimension",
+        "sampler_cluster_n",
+        "feature_sampler_ratio"
+    ]
     for dataloader_count, dataloaders in enumerate(list_of_dataloaders):
         LOGGER.info(
             "Evaluating dataset [{}] ({}/{})...".format(
@@ -95,8 +101,13 @@ def run(
                 )
                 torch.cuda.empty_cache()
                 PatchCore.fit(dataloaders["training"])
-
-            torch.cuda.empty_cache()
+                # parameter save
+                parameter = PatchCore.load_()
+                parameter.append(sampler.load_())
+            torch.cuda.empty_cache() 
+            
+            start_time = time.time()
+            
             aggregator = {"scores": [], "segmentations": []}
             for i, PatchCore in enumerate(PatchCore_list):
                 torch.cuda.empty_cache()
@@ -128,9 +139,17 @@ def run(
                 .max(axis=-1)
                 .reshape(-1, 1, 1, 1)
             )
+            _segmentations = segmentations.copy()
+            _segmentations = _segmentations/ max_scores
+            _segmentations = np.mean(_segmentations, axis = 0)
+            
             segmentations = (segmentations - min_scores) / (max_scores - min_scores)
             segmentations = np.mean(segmentations, axis=0)
-
+            
+            # np.save("/home/lab/patch_core_/segmentation_train.npy", segmentations)
+            threshold = 0.7
+            mask_ = segmentations >= threshold
+            
             anomaly_labels = [
                 x[1] != "good" for x in dataloaders["testing"].dataset.data_to_iterate
             ]
@@ -143,8 +162,11 @@ def run(
                 mask_paths = [
                     x[3] for x in dataloaders["testing"].dataset.data_to_iterate
                 ]
-
+                
                 def image_transform(image):
+                    dataloaders['testing'].dataset.transform_std = [0.229, 0.224, 0.225]
+                    dataloaders['testing'].dataset.transform_mean = [0.485, 0.456, 0.406]
+                    
                     in_std = np.array(
                         dataloaders["testing"].dataset.transform_std
                     ).reshape(-1, 1, 1)
@@ -166,7 +188,7 @@ def run(
                 patchcore.utils.plot_segmentation_images(
                     image_save_path,
                     image_paths,
-                    segmentations,
+                    _segmentations,
                     scores,
                     mask_paths,
                     image_transform=image_transform,
@@ -177,7 +199,12 @@ def run(
             auroc = patchcore.metrics.compute_imagewise_retrieval_metrics(
                 scores, anomaly_labels
             )["auroc"]
-
+            end_time = time.time()
+            total_time = end_time - start_time
+            print(f'total_time : {total_time}s')
+            
+            # print(scores)
+            
             # Compute PRO score & PW Auroc for all images
             pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
                 segmentations, masks_gt
@@ -230,8 +257,10 @@ def run(
     result_dataset_names = [results["dataset_name"] for results in result_collect]
     result_scores = [list(results.values())[1:] for results in result_collect]
     patchcore.utils.compute_and_store_final_results(
-        run_save_path,
-        result_scores,
+        parameter_name = parameter_name,
+        parameter=parameter,
+        results_path = run_save_path,
+        results = result_scores,
         column_names=result_metric_names,
         row_names=result_dataset_names,
     )
@@ -256,6 +285,10 @@ def run(
 # NN on GPU.
 @click.option("--faiss_on_gpu", is_flag=True)
 @click.option("--faiss_num_workers", type=int, default=8)
+# Sampler_option
+@click.option("--sampler_ratio", type = float, default = 0.4)
+@click.option("--sampler_dimension", type = int, multiple = False ,default = 128)
+@click.option("--sampler_cluster_n", type = int, default = 10)
 def patch_core(
     backbone_names,
     layers_to_extract_from,
@@ -270,6 +303,9 @@ def patch_core(
     patchsize_aggregate,
     faiss_on_gpu,
     faiss_num_workers,
+    sampler_ratio,
+    sampler_dimension,
+    sampler_cluster_n,
 ):
     backbone_names = list(backbone_names)
     if len(backbone_names) > 1:
@@ -308,11 +344,14 @@ def patch_core(
                 featuresampler=sampler,
                 anomaly_scorer_num_nn=anomaly_scorer_num_nn,
                 nn_method=nn_method,
+                sampler_ratio=sampler_ratio,
+                sampler_dimension=sampler_dimension,
+                sampler_cluster_n=sampler_cluster_n,
             )
             loaded_patchcores.append(patchcore_instance)
         return loaded_patchcores
 
-    return ("get_patchcore", get_patchcore)
+    return ("get_patchcore", get_patchcore) 
 
 
 @main.command("sampler")

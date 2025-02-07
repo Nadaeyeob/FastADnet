@@ -28,23 +28,26 @@ class FaissNN(object):
 
     def _index_to_gpu(self, index):
         if self.on_gpu:
+            pass
             # For the non-gpu faiss python package, there is no GpuClonerOptions
             # so we can not make a default in the function header.
-            return faiss.index_cpu_to_gpu(
-                faiss.StandardGpuResources(), 0, index, self._gpu_cloner_options()
-            )
+            # return faiss.index_cpu_to_gpu(
+            #     faiss.StandardGpuResources(), 0, index, self._gpu_cloner_options()
+            # )
         return index
 
     def _index_to_cpu(self, index):
         if self.on_gpu:
-            return faiss.index_gpu_to_cpu(index)
+            # return faiss.index_gpu_to_cpu(index)
+            pass
         return index
 
     def _create_index(self, dimension):
         if self.on_gpu:
-            return faiss.GpuIndexFlatL2(
-                faiss.StandardGpuResources(), dimension, faiss.GpuIndexFlatConfig()
-            )
+            pass
+            # return faiss.GpuIndexFlatL2(
+            #     faiss.StandardGpuResources(), dimension, faiss.GpuIndexFlatConfig()
+            # )
         return faiss.IndexFlatL2(dimension)
 
     def fit(self, features: np.ndarray) -> None:
@@ -149,7 +152,7 @@ class Preprocessing(torch.nn.Module):
         self.output_dim = output_dim
 
         self.preprocessing_modules = torch.nn.ModuleList()
-        for input_dim in input_dims:
+        for input_dim in input_dims: 
             module = MeanMapper(output_dim)
             self.preprocessing_modules.append(module)
 

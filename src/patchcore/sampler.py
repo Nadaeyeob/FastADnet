@@ -34,7 +34,8 @@ class BaseSampler(abc.ABC):
         if self.features_is_numpy:
             return features.cpu().numpy()
         return features.to(self.features_device)
-
+    def load_(self):
+        return self.percentage
 
 class GreedyCoresetSampler(BaseSampler):
     def __init__(
@@ -73,9 +74,9 @@ class GreedyCoresetSampler(BaseSampler):
         if isinstance(features, np.ndarray):
             features = torch.from_numpy(features)
         reduced_features = self._reduce_features(features)
-        sample_indices = self._compute_greedy_coreset_indices(reduced_features)
+        sample_indices, cluster_indices = self._compute_greedy_coreset_indices(reduced_features)
         features = features[sample_indices]
-        return self._restore_type(features)
+        return self._restore_type(features), sample_indices, cluster_indices
 
     @staticmethod
     def _compute_batchwise_differences(
@@ -122,9 +123,11 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
         device: torch.device,
         number_of_starting_points: int = 10,
         dimension_to_project_features_to: int = 128,
+        cluster_n: int = 10
     ):
         """Approximate Greedy Coreset sampling base class."""
         self.number_of_starting_points = number_of_starting_points
+        self.cluster_n = cluster_n
         super().__init__(percentage, device, dimension_to_project_features_to)
 
     def _compute_greedy_coreset_indices(self, features: torch.Tensor) -> np.ndarray:
@@ -151,10 +154,12 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
             approximate_distance_matrix, axis=-1
         ).reshape(-1, 1)
         coreset_indices = []
+        cluster_indices = []
         num_coreset_samples = int(len(features) * self.percentage)
 
         with torch.no_grad():
-            for _ in tqdm.tqdm(range(num_coreset_samples), desc="Subsampling..."):
+            for n in tqdm.tqdm(range(num_coreset_samples), desc="Subsampling..."):
+                ### choose samples far from start num_coreset_samples
                 select_idx = torch.argmax(approximate_coreset_anchor_distances).item()
                 coreset_indices.append(select_idx)
                 coreset_select_distance = self._compute_batchwise_differences(
@@ -167,8 +172,19 @@ class ApproximateGreedyCoresetSampler(GreedyCoresetSampler):
                 approximate_coreset_anchor_distances = torch.min(
                     approximate_coreset_anchor_distances, dim=1
                 ).values.reshape(-1, 1)
-
-        return np.array(coreset_indices)
+                
+                ### 0.1의 경우 sampling 비율과 맞춰서 진행, top10_index 대신 1/0.1 사용
+                top10_index = int(coreset_select_distance.size(0) * 0.1)
+                negative_distance = -coreset_select_distance
+                
+                ### Outlier를 제거하기 위해 10% 는 빼버리고 시작
+                
+                _, cluster_indice = torch.topk(negative_distance.view(-1),
+                                            self.cluster_n)
+                cluster_indice = cluster_indice.cpu().numpy()
+                cluster_indices.append(cluster_indice)
+                
+        return np.array(coreset_indices), np.array(cluster_indices)
 
 
 class RandomSampler(BaseSampler):
